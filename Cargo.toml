@@ -1,0 +1,8 @@
+[package]
+name = "lifetime_c"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clang-sys = "1.2"
+clang = "1.0"
