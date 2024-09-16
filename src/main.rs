@@ -13,8 +13,8 @@ fn print_cursor_info(cursor: CXCursor, indentation: u32) {
         let spelling = clang_getCursorSpelling(cursor);
 
         // Convert C strings to Rust strings
-        let kind_cstr = CStr::from_ptr(clang_getCString(kind_spelling));
-        let spelling_cstr = CStr::from_ptr(clang_getCString(spelling));
+        let label = CStr::from_ptr(clang_getCString(kind_spelling));
+        let value = CStr::from_ptr(clang_getCString(spelling));
 
         // Print indentation
         for _ in 0..indentation {
@@ -36,9 +36,13 @@ fn print_cursor_info(cursor: CXCursor, indentation: u32) {
         // Print the cursor kind and name
         println!(
             "{}: {}",
-            kind_cstr.to_string_lossy(),
-            spelling_cstr.to_string_lossy()
+            label.to_string_lossy(),
+            value.to_string_lossy()
         );
+
+        if label.to_string_lossy() == "ParmDecl" {
+
+        }
 
         // Clean up
         clang_disposeString(kind_spelling);
@@ -51,16 +55,15 @@ extern "C" fn visit_cursor(
     _parent: CXCursor,
     client_data: CXClientData,
 ) -> CXChildVisitResult {
-    let indentation = unsafe { *(client_data as *const u32) };
-    print_cursor_info(cursor, indentation);
+    // let indentation = unsafe { *(client_data as *const u32) };
 
-    let new_indentation = indentation + 1;
+    let map = unsafe { &mut *(client_data as *mut HashMap<String, u32>) };
+
+    print_cursor_info(cursor, 0);
+
+    // let new_indentation = indentation + 1;
     unsafe {
-        clang_visitChildren(
-            cursor,
-            visit_cursor,
-            &new_indentation as *const u32 as CXClientData,
-        );
+        clang_visitChildren(cursor, visit_cursor, client_data);
     }
 
     CXChildVisit_Continue
@@ -102,15 +105,15 @@ fn main() {
         // Get the root cursor of the AST
         let root_cursor = clang_getTranslationUnitCursor(translation_unit);
 
+        let mut cursor_map: HashMap<String, u32> = HashMap::new();
+
         // Start visiting AST nodes
         let indentation: u32 = 0;
         clang_visitChildren(
             root_cursor,
             visit_cursor,
-            &indentation as *const u32 as *mut c_void,
+            &mut cursor_map as *mut HashMap<String, u32> as *mut c_void,
         );
-
-        // Clean up
         clang_disposeTranslationUnit(translation_unit);
         clang_disposeIndex(index);
     }
