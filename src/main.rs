@@ -26,10 +26,10 @@ fn print_cursor_info(cursor: CXCursor, indentation: u32) {
 
         let type_spelling = clang_getTypeSpelling(cursor_type);
 
-        print!(
-            " (Type: {})",
-            CStr::from_ptr(clang_getCString(type_spelling)).to_string_lossy()
-        );
+        // print!(
+        //     " (Type: {})",
+        //     CStr::from_ptr(clang_getCString(type_spelling)).to_string_lossy()
+        // );
 
         // Print the cursor kind and name
         println!(
