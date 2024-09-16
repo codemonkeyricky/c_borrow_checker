@@ -1,5 +1,7 @@
 extern crate clang_sys;
 
+use std::collections::HashMap;
+
 use clang_sys::*;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_void;
