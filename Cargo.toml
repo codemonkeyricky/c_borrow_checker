@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 clang-sys = "1.2"
 clang = "1.0"
+regex = "1.10.6"

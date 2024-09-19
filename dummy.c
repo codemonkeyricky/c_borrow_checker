@@ -1,22 +1,20 @@
-#include "dummy.h"
 
-#define BORROW [[clang::annotate("BORROW")]]
-#define MOVE [[clang::annotate("MOVE")]]
+#include "dummy.h"
+#define MOVE __attribute__((annotate("MOVE")))
+#define BORROW __attribute__((annotate("BORROW")))
+#define EMPTY __attribute__((annotate("EMPTY")))
 
 int* single(MOVE int* d) { return d; }
 
-int function(BORROW const int* d1, MOVE const int* d2) {
-  int d3;
+int function(MOVE const int* d1, BORROW const int* d2) {
+  EMPTY int* clear = 0;
+  int* d3;
   int d4;
-  const int d5;
 
-  d3 = *d1;
+  d1 = clear;
 
-  d4 = *data(&d3, &d4);
+  int * a = single(&d1);
 
-  int *d6 = single(single(single(d6)));
-
-  return d3;
+  d3 = d1;
+  *d3 = *d1;
 }
-
-int main() { ; }
