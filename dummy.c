@@ -1,20 +1,47 @@
 
-#include "dummy.h"
+// #include <time.h>
+__attribute__((annotate("OWNERSHIP_DROP"))) void inline ownership_drop(
+    void *p) {}
 #define MOVE __attribute__((annotate("MOVE")))
 #define BORROW __attribute__((annotate("BORROW")))
-#define EMPTY __attribute__((annotate("EMPTY")))
+#define OWNERSHIP_DROP(p) (ownership_drop(p))
 
-int* single(MOVE int* d) { return d; }
+struct Subet {
+  void *a;
+  void *b;
+  void *c;
+};
 
-int function(MOVE const int* d1, BORROW const int* d2) {
-  EMPTY int* clear = 0;
-  int* d3;
-  int d4;
+struct Set {
+  void *a;
+  struct Subset *s;
+};
 
-  d1 = clear;
+// struct dummy {
+//   MOVE int *d0;
+//   BORROW int d1;
+// };
 
-  int * a = single(&d1);
+// int* single(MOVE int* d) { return d; }
+MOVE int *double_param(MOVE int *a, MOVE int *b);
 
-  d3 = d1;
-  *d3 = *d1;
+MOVE int function(MOVE const int *d1, BORROW const int *d2) {
+  int *a, *b;
+
+  // OWNERSHIP_DROP(a);
+  volatile int dummy = 0;
+  volatile int dummy2 = 0;
+
+  if (dummy)
+    return 0;
+
+  if (dummy) {
+    // a = double_param(a, b);
+    a = double_param(double_param(a, b), b);
+  } else if (dummy2) {
+    b = double_param(a, a);
+  }
+
+  // d3 = d1;
+  // *d3 = *d1;
 }

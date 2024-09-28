@@ -1,73 +1,17 @@
-
-extern crate clang_sys;
 use regex::Regex;
 
-use std::collections::HashMap;
+use std::fs::File;
+use std::io::{self, BufRead};
+use std::path::Path;
 
-use clang_sys::*;
-use std::ffi::{CStr, CString};
-use std::os::raw::c_void;
-use std::ptr;
+use serde_json::Value;
+use std::fs;
 
-fn pre_process(cursor: CXCursor, state: &mut ExecutionState) -> (String, String) {
-    unsafe {
-        let kind_spelling = clang_getCursorKindSpelling(clang_getCursorKind(cursor));
-        let spelling = clang_getCursorSpelling(cursor);
+mod def;
+mod verify;
 
-        // Convert C strings to Rust strings
-        let kind_cstr = CStr::from_ptr(clang_getCString(kind_spelling));
-        let spelling_cstr = CStr::from_ptr(clang_getCString(spelling));
-
-        let indentation = state.indent;
-
-        // Print indentation
-        for _ in 0..indentation {
-            print!("  ");
-        }
-
-        let cursor_type = clang_getCursorType(cursor);
-        if clang_isConstQualifiedType(cursor_type) != 0 {
-            print!(" [const] ");
-        }
-
-        let node_type = kind_cstr.to_str().unwrap().to_string();
-        let mut node_value = spelling_cstr.to_str().unwrap().to_string();
-
-        let type_spelling = clang_getTypeSpelling(cursor_type);
-        let type_spelling_csr = CStr::from_ptr(clang_getCString(type_spelling));
-        // print!(" (Type: {})", type_spelling_csr.to_string_lossy());
-
-        if node_type == "ParmDecl" || node_type == "VarDecl" || node_type == "FunctionDecl" {
-            let nn = format!(
-                "{} {}",
-                type_spelling_csr.to_str().unwrap().to_string(),
-                node_value
-            );
-            node_value = nn;
-        }
-
-        if node_type == "CallExpr" {
-            state.decl_ref_expr_cnt = 0;
-        }
-
-        if node_type == "DeclRefExpr" {
-            state.decl_ref_expr_cnt += 1;
-        }
-
-        let node = format!("{}: {}", node_type, node_value,);
-
-        // Print the cursor kind and name
-        println!("{}", node);
-
-        state.ast.push(node.to_string());
-
-        // Clean up
-        clang_disposeString(kind_spelling);
-        clang_disposeString(spelling);
-
-        (node_type, node_value)
-    }
-}
+use def::*;
+use verify::*;
 
 fn parse_variable(value: String) -> (bool, u32, String)
 /* mutability, indirection, name */ {
@@ -83,11 +27,10 @@ fn parse_variable(value: String) -> (bool, u32, String)
 
 fn parse_decl_stmt(state: &mut ExecutionState) {
     /* Pop DeclStmt */
-    let _ = state.ast.pop().unwrap();
-
+    /*
     for k in 0..state.var_decl {
         /* Pop variable declaration */
-        let value = state.cmd_stack.pop().unwrap();
+        let value = state.cmd.pop().unwrap();
 
         /* Parse variable */
         let (mutable, indirection, label) = parse_variable(value);
@@ -103,6 +46,7 @@ fn parse_decl_stmt(state: &mut ExecutionState) {
     }
 
     state.var_decl = 0;
+    */
 
     // println!("{:?}", state.variables);
 }
@@ -114,62 +58,100 @@ fn split(s: String) -> (String, String) {
     (label.to_string(), value.to_string())
 }
 
-fn parse_parm_decl(state: &mut ExecutionState) {
+fn post_ParmVarDecl(state: &mut ExecutionState, map: &serde_json::Map<std::string::String, Value>) {
     /* Parse ownership */
     let ownership = state.annotation.contains("MOVE");
     state.annotation.clear();
 
-    /*
-     * Pop ParmDecl
-     */
-    let (l, v) = split(state.ast.pop().unwrap());
-    let (mutable, indirection, label) = parse_variable(v);
+    let name = map.get("name").unwrap().as_str().unwrap().to_string();
+    let qual_type = get_qual_type(map.get("type").unwrap()).unwrap();
+
+    // println!("{} {}", name, qual_type);
+
+    let is_const = qual_type.matches("const").count();
+    let indirection = qual_type.matches("*").count();
 
     let variable = Variable {
-        mutable,
+        mutable: is_const == 0,
         ownership,
-        indirection,
+        indirection: indirection as u32,
     };
 
-    /* Insert variable */
-    state.variables.insert(label, variable.clone());
-
-    state.params.get_or_insert_with(Vec::new).push(variable);
-
-    // println!("{:?}", state.variables);
+    let inst = Inst::ParamDecl(name, variable);
+    state.inst.push(inst);
 }
 
-fn parse_decl_ref_expr(state: &mut ExecutionState) {
-    /* Pop DeclRefExpr */
-    let (l, v) = split(state.ast.pop().unwrap());
+fn post_FieldDecl(state: &mut ExecutionState, map: &serde_json::Map<std::string::String, Value>) {
+    /* Parse ownership */
+    assert!(state.annotation.len() != 0);
 
-    state.cmd_stack.push(v);
+    let ownership = state.annotation.contains("MOVE");
+    state.annotation.clear();
+
+    let name = map.get("name").unwrap().as_str().unwrap().to_string();
+    let qual_type = get_qual_type(map.get("type").unwrap()).unwrap();
+
+    println!("{} {}", name, qual_type);
+
+    let is_const = qual_type.matches("const").count();
+    let indirection = qual_type.matches("*").count();
+
+    let variable = Variable {
+        mutable: is_const == 0,
+        ownership,
+        indirection: indirection as u32,
+    };
+
+    let inst = Inst::FieldDecl(name, variable);
+    state.inst.push(inst);
+}
+
+fn post_DeclRefExpr(state: &mut ExecutionState) {
+    /* Pop DeclRefExpr */
+    // let (l, v) = split(state.ast.pop().unwrap());
+
+    // state.cmd.push(v);
 }
 
 fn parse_unexposed_expr(state: &mut ExecutionState) {
     /* Pop DeclRefExpr */
-    let (l, v) = split(state.ast.pop().unwrap());
+    // let (l, v) = split(state.ast.pop().unwrap());
 
     /* No side effects */
 }
 
-fn parse_call_expr(state: &mut ExecutionState) {
-    let _ = split(state.ast.pop().unwrap());
-
-    // todo!(); // Functions with than one arguments??
-    // let arg = state.cmd_stack.pop().unwrap();
-    // let func = state.cmd_stack.pop().unwrap();
-
-    let mut params = Vec::new();
-    for k in 0..state.decl_ref_expr_cnt - 1 {
-        params.push(state.cmd_stack.pop().unwrap());
+fn post_process_CallExpr(state: &mut ExecutionState, children: u32) {
+    let mut args = Vec::new();
+    for k in 0..children - 1 {
+        let inst = state.inst.pop().unwrap();
+        match inst {
+            Inst::VarDecl(label, variable) => {
+                args.push(ExprDescriptor::LocalVariable(label));
+            }
+            Inst::Eval(expr) => match expr {
+                ExprDescriptor::FunctionCall(label, aargs) => {
+                    args.push(ExprDescriptor::FunctionCall(label, aargs));
+                }
+                _ => {
+                    unreachable!();
+                }
+            },
+            _ => {
+                unreachable!();
+            }
+        }
     }
-    params.reverse();
+    args.reverse();
+    let func = state.inst.pop().unwrap();
 
-    let func = state.cmd_stack.pop().unwrap();
-
-    if func == "ownership_drop" {
-        // state.variables.get_mut(&params.first()).unwrap().ownership = false;
+    match func {
+        Inst::VarDecl(label, variable) => {
+            let inst = Inst::Eval(ExprDescriptor::FunctionCall(label, args));
+            state.inst.push(inst);
+        }
+        _ => {
+            unreachable!();
+        }
     }
 }
 
@@ -189,226 +171,494 @@ fn split_function_signature(signature: &str) -> Option<(String, String, String)>
     }
 }
 
-fn parse_function_decl(state: &mut ExecutionState) {
-    let (l, v) = split(state.ast.pop().unwrap());
+fn remove_parentheses(s: &str) -> String {
+    // Define a regular expression that matches everything inside parentheses (inclusive)
+    let re = Regex::new(r"\([^)]*\)").unwrap();
 
-    let (p1, p2, p3) = split_function_signature(&v).unwrap();
+    // Replace all matches with an empty string
+    re.replace_all(s, "").to_string()
+}
 
-    let mut ret_val: Option<Variable> = None;
+fn post_FunctionDecl(
+    state: &mut ExecutionState,
+    map: &serde_json::Map<std::string::String, Value>,
+    inst_cnt: usize,
+) {
+    let mut name: Option<&str> = None;
+    let mut qual_type: Option<&str> = None;
 
-    if p1 != "void" {
-        let (mutable, indirection, label) = parse_variable(p1);
-        ret_val = Some(Variable {
-            mutable,
-            ownership: true,
-            indirection,
+    let name = map.get("name").unwrap().as_str().unwrap().to_string();
+    let qual_type = get_qual_type(map.get("type").unwrap()).unwrap();
+
+    let ret_type = remove_parentheses(qual_type);
+    let is_const = ret_type.matches("const").count();
+    let indirection = ret_type.matches("*").count();
+
+    let mut return_type = None;
+    if ret_type.contains("void") && indirection == 0 {
+    } else {
+        return_type = Some(Variable {
+            ownership: false,
+            mutable: is_const == 0,
+            indirection: indirection as u32,
         });
     }
 
-    let func = Function {
-        params: state.params.take(),
-        ret_val,
-    };
+    let curr_size = state.inst.len();
 
-    state.functions.insert(p3, func);
+    let mut inst_set = Vec::new();
+    for k in 0..curr_size - inst_cnt {
+        let inst = state.inst.pop().unwrap();
+        inst_set.push(inst);
+    }
+    inst_set.reverse();
 
-    // End of function processing - drop all variables
-    state.variables.clear();
+    let mut inst = Vec::new();
+    let mut param = Vec::new();
+    for k in inst_set.iter() {
+        match k {
+            Inst::ParamDecl(name, property) => {
+                param.push(property.clone());
+            }
+            Inst::InstSet(set) => {
+                inst = set.clone();
+            }
+            _ => {
+                unreachable!();
+            }
+        }
+    }
+
+    state
+        .tl
+        .sub_unit
+        .push(TranslationUnitSet::Function(Function {
+            name,
+            param,
+            ret_val: return_type,
+            inst,
+        }));
 }
 
-fn parse_binary_operator(state: &mut ExecutionState) {
+fn post_BinaryOperator(state: &mut ExecutionState, children: u32) {
     /* Pop BinaryOperator */
-    let _ = state.ast.pop();
+    // let _ = state.ast.pop();
 
-    /* Pop the operands */
-    let rhs_label = state.cmd_stack.pop().unwrap();
-    let lhs_label = state.cmd_stack.pop().unwrap();
+    let rhs = state.inst.pop().unwrap();
+    let lhs = state.inst.pop().unwrap();
 
-    /* Evaluate correctness */
-    // println!("{} = {}", lhs_label, rhs_label);
-    let lhs = state.variables.get(&lhs_label);
-    let rhs = state.variables.get(&rhs_label);
-
-    if lhs.unwrap().ownership {
-        assert!(
-            false,
-            "ERROR: Transfering ownership to '{}' while variable already holds ownership!",
-            lhs_label
-        );
+    match (lhs, rhs) {
+        (Inst::VarDecl(label, variable), Inst::Eval(expr)) => {
+            state.inst.push(Inst::Assign(label, expr));
+        }
+        _ => {
+            unreachable!();
+        }
     }
 }
 
-fn parse_var_decl(state: &mut ExecutionState) {
+fn post_VarDecl(state: &mut ExecutionState) {
     /* Pop VarDecl */
-    let (_, value) = split(state.ast.pop().unwrap());
+    // let (_, value) = split(state.ast.pop().unwrap());
 
-    /* Push the raw string onto cmd_stack for future process */
-    state.cmd_stack.push(value);
+    // /* Push the raw string onto cmd for future process */
+    // state.cmd.push(value);
 
     state.var_decl += 1;
 }
 
-fn parse_attribute_annotate(state: &mut ExecutionState) {
+fn post_attribute_annotate(state: &mut ExecutionState) {
     /* Pop annotation */
-    let (l, v) = split(state.ast.pop().unwrap());
-
-    state.annotation = v;
+    // let (l, v) = split(state.ast.pop().unwrap());
+    // state.annotation = v;
 }
 
-fn parse_compound_stmt(state: &mut ExecutionState) {
-    /* Throw away */
-    let _ = split(state.ast.pop().unwrap());
+fn post_CompoundStmt(state: &mut ExecutionState, inst_cnt: usize) {
+    let curr_size = state.inst.len();
+
+    let mut inst_set = Vec::new();
+    for k in 0..curr_size - inst_cnt {
+        let inst = state.inst.pop().unwrap();
+        inst_set.push(inst);
+    }
+    inst_set.reverse();
+
+    state.inst.push(Inst::InstSet(inst_set));
+}
+
+fn post_IfStmt(state: &mut ExecutionState, inst_cnt: usize) {
+    let curr_size = state.inst.len();
+    let mut inst_set = Vec::new();
+    for k in 0..curr_size - inst_cnt {
+        let inst = state.inst.pop().unwrap();
+        inst_set.push(inst);
+    }
+    inst_set.reverse();
+
+    state.inst.push(Inst::If(inst_set));
+}
+
+fn post_ReturnStmt(state: &mut ExecutionState) {
+    /* TODO: return real variable */
+    state.inst.push(Inst::ReturnStmt("".to_string()));
 }
 
 fn parse_paren_expr(state: &mut ExecutionState) {
     /* Throw away */
-    let _ = split(state.ast.pop().unwrap());
-}
-
-extern "C" fn visit_cursor(
-    cursor: CXCursor,
-    _parent: CXCursor,
-    client_data: CXClientData,
-) -> CXChildVisitResult {
-    let state: &mut ExecutionState = unsafe { &mut *(client_data as *mut ExecutionState) };
-
-    let (node_type, node_value) = pre_process(cursor, state);
-
-    state.indent += 1;
-    unsafe {
-        clang_visitChildren(cursor, visit_cursor, client_data);
-    }
-    state.indent -= 1;
-
-    match node_type.as_str() {
-        "FunctionDecl" => {
-            parse_function_decl(state);
-        }
-        "CallExpr" => {
-            parse_call_expr(state);
-        }
-        "UnexposedExpr" => {
-            parse_unexposed_expr(state);
-        }
-        "DeclRefExpr" => {
-            parse_decl_ref_expr(state);
-        }
-        "ParmDecl" => {
-            parse_parm_decl(state);
-        }
-        "DeclStmt" => {
-            parse_decl_stmt(state);
-        }
-        "BinaryOperator" => {
-            parse_binary_operator(state);
-        }
-        "VarDecl" => {
-            parse_var_decl(state);
-        }
-        "attribute(annotate)" => {
-            parse_attribute_annotate(state);
-        }
-        "CompoundStmt" => {
-            parse_compound_stmt(state);
-        }
-        "ParenExpr" => {
-            parse_paren_expr(state);
-        }
-        // "ReturnStmt" => {}
-        _ => {
-            todo!()
-        }
-    }
-
-    CXChildVisit_Continue
+    // let _ = split(state.ast.pop().unwrap());
 }
 
 struct Component {}
 
-#[derive(Debug, Clone)]
-struct Variable {
-    mutable: bool,
-    ownership: bool,
-    indirection: u32,
-}
+// struct Declared impl Variable {}
 
-struct Function {
-    params: Option<Vec<Variable>>,
-    ret_val: Option<Variable>,
+// struct Declared Variable {
+//     mutable: bool,
+//     ownership: bool,
+//     indirection: u32,
+// }
+
+// fn evaluate(expr: &ExprDescriptor) -> ExprResult {}
+
+fn evaluate(rhs: &ExprDescriptor) -> ExprResult {
+    match rhs {
+        ExprDescriptor::FunctionCall(func, params) => {
+            let mut args = Vec::new();
+            for k in 0..params.len() {
+                args.push(evaluate(&params[k]));
+            }
+
+            /* TODO: verify logic */
+
+            return ExprResult::TemporaryVariable(/* todo */ true);
+        }
+        ExprDescriptor::LocalVariable(var) => {
+            return ExprResult::DeclaredVariable(var.clone());
+        }
+    }
 }
 
 struct ExecutionState {
-    decl_ref_expr_cnt: u32,
-    params: Option<Vec<Variable>>,
-    variables: HashMap<String, Variable>,
-    functions: HashMap<String, Function>,
-    indent: u32,
-    ast: Vec<String>,
-    cmd_stack: Vec<String>,
+    // params: Option<Vec<Variable>>,
+    // variables: HashMap<String, Variable>,
+    // declared_functions: HashMap<String, Function>,
+    depth: u32,
+    // cmd: Vec<String>,
     annotation: String,
     var_decl: u32,
+    inst: Vec<Inst>,
+    tl: TranslationUnit,
+}
+
+fn post_processing(
+    map: &serde_json::Map<std::string::String, Value>,
+    state: &mut ExecutionState,
+    children: u32,
+    inst_cnt: usize,
+) {
+    if let Some(kind) = map.get("kind") {
+        if let Some(kind_str) = kind.as_str() {
+            match kind_str {
+                "FunctionDecl" => {
+                    post_FunctionDecl(state, map, inst_cnt);
+                }
+                "CallExpr" => {
+                    post_process_CallExpr(state, children);
+                }
+                "UnexposedExpr" => {
+                    parse_unexposed_expr(state);
+                }
+                "DeclRefExpr" => {
+                    post_DeclRefExpr(state);
+                }
+                "ParmVarDecl" => {
+                    post_ParmVarDecl(state, map);
+                }
+                "FieldDecl" => {
+                    post_FieldDecl(state, map);
+                }
+                "DeclStmt" => {
+                    parse_decl_stmt(state);
+                }
+                "BinaryOperator" => {
+                    post_BinaryOperator(state, children);
+                }
+                "VarDecl" => {
+                    post_VarDecl(state);
+                }
+                "attribute(annotate)" => {
+                    post_attribute_annotate(state);
+                }
+                "CompoundStmt" => {
+                    post_CompoundStmt(state, inst_cnt);
+                }
+                "ParenExpr" => {
+                    parse_paren_expr(state);
+                }
+                "IfStmt" => {
+                    post_IfStmt(state, inst_cnt);
+                }
+                "ReturnStmt" => {
+                    post_ReturnStmt(state);
+                }
+                "BuiltinType" => {}
+                "TypedefDecl" => {}
+                "RecordDecl" => {}
+                "RecordType" => {}
+                "PointerType" => {}
+                "ConstantArrayType" => {}
+                // "ReturnStmt" => {}
+                "AnnotateAttr" => {}
+                "ImplicitCastExpr" => {}
+                "TranslationUnitDecl" => {}
+                "IntegerLiteral" => {}
+                _ => {
+                    println!("{}", kind_str);
+                    todo!()
+                }
+            }
+        }
+    }
+}
+
+fn get_qual_type(value: &Value) -> Option<&str> {
+    if let Value::Object(map) = value {
+        if let Some(kind) = map.get("qualType") {
+            if let Some(kind_str) = kind.as_str() {
+                return Some(kind_str);
+            }
+        }
+    }
+    None
+}
+
+fn pre_process_referenced_decl(state: &mut ExecutionState, value: &Value) {
+    if let Value::Object(map) = value {
+        let mut name: Option<&str> = None;
+        let mut qual_type: Option<&str> = None;
+        let mut inner: Option<&Value> = None;
+
+        // Traverse nested objects or arrays
+        for (l, v) in map {
+            match l.as_str() {
+                "name" => name = v.as_str(),
+                "type" => {
+                    qual_type = get_qual_type(v);
+                }
+                "inner" => {
+                    inner = Some(v);
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        // let stmt = format!("{}", name.unwrap());
+        // state.cmd.push(stmt);
+
+        // TODO:
+        let variable = Variable {
+            mutable: false,
+            ownership: false,
+            indirection: 0,
+        };
+
+        let inst = Inst::VarDecl(name.unwrap().to_string(), variable);
+        state.inst.push(inst);
+    }
+}
+
+fn extract_annotation_from_source(line: u64, start: u64, end: u64) -> Option<String> {
+    // Open the file
+    let path = Path::new("dummy.c");
+    let file = File::open(&path).expect("Failed to open dummy.c");
+
+    // Use BufReader to read the file line by line
+    let reader = io::BufReader::new(file);
+
+    // Find the specified line (note: line numbers are 1-based)
+    let line_content = reader.lines().nth((line - 1) as usize);
+
+    match line_content {
+        Some(Ok(line_text)) => {
+            // Extract the part of the line between start and end positions
+            let line_len = line_text.len() as u64;
+            if start < line_len && end <= line_len && start <= end {
+                let rv = line_text[start as usize..end as usize].to_string();
+
+                let rv = rv.as_str();
+
+                let start = rv.find('\"')? + 1; // First double quote after `annotate(`
+                let end = rv.rfind('\"')?; // Last double quote
+
+                // Extract the substring between the quotes
+                return Some(rv[start..end].to_string());
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+        None => return None,
+    }
+}
+
+fn parse_annotation(state: &mut ExecutionState, value: &Value) -> Option<String> {
+    if let Value::Object(map) = value {
+        let l0 = map.get("begin")?.get("spellingLoc")?.get("line")?;
+
+        let c0 = map.get("begin")?.get("spellingLoc")?.get("col")?;
+
+        let l1 = map.get("end")?.get("spellingLoc")?.get("line")?;
+
+        let c1 = map.get("end")?.get("spellingLoc")?.get("col")?;
+
+        assert!(l0.as_u64() == l1.as_u64());
+        let annotation =
+            extract_annotation_from_source(l0.as_u64()?, c0.as_u64()? - 1, c1.as_u64()?);
+        return annotation;
+    }
+
+    None
+}
+
+fn pre_processing(state: &mut ExecutionState, map: &serde_json::Map<std::string::String, Value>) {
+    let mut kind: Option<&str> = None;
+    let mut name: Option<&str> = None;
+    let mut qual_type: Option<&str> = None;
+    let mut inner: Option<&Value> = None;
+    let mut range: Option<&Value> = None;
+    let mut referenced_decl: Option<&Value> = None;
+
+    // Traverse nested objects or arrays
+    for (l, v) in map {
+        match l.as_str() {
+            "id" => { /* don't care */ }
+            "loc" => { /* don't care */ }
+            "range" => {
+                range = Some(v);
+            }
+            "isUsed" => { /* don't care */ }
+            "kind" => kind = v.as_str(),
+            "name" => name = v.as_str(),
+            "type" => {
+                qual_type = get_qual_type(v);
+                // todo!()
+            }
+            "inner" => {
+                inner = Some(v);
+                break;
+            }
+            "referencedDecl" => {
+                referenced_decl = Some(v);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    match kind.unwrap_or("") {
+        "VarDecl" => {
+            // let push = format!("{} {}", qual_type.unwrap_or(""), name.unwrap_or(""));
+            // state.cmd.push(push);
+
+            /* TODO */
+            let var = Variable {
+                mutable: false,
+                ownership: false,
+                indirection: 0,
+            };
+
+            state
+                .inst
+                .push(Inst::VarDecl(name.unwrap_or("").to_string(), var));
+        }
+        "DeclStmt" => {}
+        "TypedefDecl" => {
+            return; /* Don't care */
+        }
+        "CallExpr" => {}
+        "DeclRefExpr" => {
+            if referenced_decl != None {
+                pre_process_referenced_decl(state, referenced_decl.unwrap());
+            }
+        }
+        "ParmVarDecl" => {
+            // let push = format!("{} {}", qual_type.unwrap_or(""), name.unwrap_or(""));
+            // state.cmd.push(push);
+        }
+        "FunctionDecl" => {
+            // let push = format!("{} {}", qual_type.unwrap_or(""), name.unwrap_or(""));
+            // state.cmd.push(push);
+        }
+        "CompoundStmt" => {}
+        _ => {}
+    }
+
+    if kind.unwrap_or("") == "AnnotateAttr" {
+        if range != None {
+            let annotation = parse_annotation(state, range.unwrap());
+            if annotation != None {
+                state.annotation = annotation.unwrap();
+            }
+        }
+    }
+
+    let indent = "  ".repeat(state.depth as usize);
+    println!("{}{}: {}", indent, kind.unwrap_or(""), name.unwrap_or(""));
+}
+
+fn traverse_json(state: &mut ExecutionState, value: &Value) -> u32 {
+    state.depth += 1;
+    let mut children = 0;
+    if let Value::Object(map) = value {
+        pre_processing(state, map);
+
+        let inst_count = state.inst.len();
+
+        if let Some(inner) = map.get("inner") {
+            children = traverse_json(state, inner);
+        }
+
+        post_processing(map, state, children, inst_count);
+    } else if let Value::Array(arr) = value {
+        for val in arr {
+            children += 1;
+            traverse_json(state, val);
+        }
+    }
+    state.depth -= 1;
+
+    children
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: {} <source-file>", args[0]);
-        return;
-    }
+    // Read the contents of the JSON file
+    let file_path = "dummy.json";
+    let json_content = fs::read_to_string(file_path).expect("Failed to read file");
 
-    let filename = &args[1];
+    // Parse the JSON content into a serde_json::Value
+    let parsed_json: Value = serde_json::from_str(&json_content).expect("Failed to parse JSON");
 
-    unsafe {
-        // Create an index
-        let index = clang_createIndex(0, 0);
+    let mut state = ExecutionState {
+        // params: None,
+        depth: 0,
+        // cmd: Vec::new(),
+        annotation: String::new(),
+        // declared_functions: HashMap::new(),
+        // variables: HashMap::new(),
+        var_decl: 0,
+        inst: Vec::new(),
+        tl: TranslationUnit {
+            sub_unit: Vec::new(),
+        },
+    };
 
-        // Convert filename to CString for libclang
-        let c_filename = CString::new(filename.as_str()).expect("CString::new failed");
+    // Start recursive traversal
+    traverse_json(&mut state, &parsed_json);
 
-        // Parse the file into a translation unit
-        let translation_unit = clang_parseTranslationUnit(
-            index,
-            c_filename.as_ptr(),
-            ptr::null(),
-            0,
-            ptr::null_mut(),
-            0,
-            CXTranslationUnit_None,
-        );
+    verify(&state.tl);
 
-        if translation_unit.is_null() {
-            eprintln!("Unable to parse translation unit");
-            clang_disposeIndex(index);
-            return;
-        }
-
-        // Get the root cursor of the AST
-        let root_cursor = clang_getTranslationUnitCursor(translation_unit);
-
-        let mut state = ExecutionState {
-            decl_ref_expr_cnt: 0,
-            params: None,
-            indent: 0,
-            ast: Vec::new(),
-            cmd_stack: Vec::new(),
-            annotation: String::new(),
-            functions: HashMap::new(),
-            variables: HashMap::new(),
-            var_decl: 0,
-        };
-
-        clang_visitChildren(
-            root_cursor,
-            visit_cursor,
-            &mut state as *mut ExecutionState as *mut c_void,
-        );
-
-        // Clean up
-        clang_disposeTranslationUnit(translation_unit);
-        clang_disposeIndex(index);
-
-        println!("{:?}", state.variables);
-    }
+    println!("Completed!");
 }
 
 /*
