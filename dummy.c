@@ -7,14 +7,14 @@ __attribute__((annotate("OWNERSHIP_DROP"))) void inline ownership_drop(
 #define OWNERSHIP_DROP(p) (ownership_drop(p))
 
 struct Subet {
-  void *a;
-  void *b;
-  void *c;
+  MOVE void *a;
+  MOVE void *b;
+  MOVE void *c;
 };
 
 struct Set {
-  void *a;
-  struct Subset *s;
+  MOVE void *a;
+  MOVE struct Subset *s;
 };
 
 // struct dummy {

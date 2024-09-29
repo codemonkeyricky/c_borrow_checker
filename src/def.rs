@@ -28,14 +28,14 @@ pub struct Function {
 #[derive(Clone)]
 
 pub enum Inst {
-    InstSet(Vec<Inst>), // CompoundStmt
-    ParamDecl(String, Variable),
-    FieldDecl(String, Variable),
-    VarDecl(String, Variable),
-    Assign(String, ExprDescriptor),
-    Eval(ExprDescriptor),
-    If(Vec<Inst>), // must be size of 3
-    ReturnStmt(String),
+    InstSet(u64, Vec<Inst>), // CompoundStmt
+    ParamDecl(u64, String, Variable),
+    FieldDecl(u64, String, Variable),
+    VarDecl(u64, String, Variable),
+    Assign(u64, String, ExprDescriptor),
+    Eval(u64, ExprDescriptor),
+    If(u64, Vec<Inst>), // must be size of 3
+    ReturnStmt(u64, String),
 }
 
 #[derive(Clone)]

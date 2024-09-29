@@ -49,27 +49,27 @@ use nix::{
 
 fn process_inst(state: &mut State, inst: &Inst) -> Result<i32, ExitCode> {
     match inst {
-        Inst::InstSet(inst_set) => {
+        Inst::InstSet(line, inst_set) => {
             // Allow early exit
             let _ = process(state, inst_set)?;
         }
-        Inst::ParamDecl(label, variable) => {
+        Inst::ParamDecl(line, label, variable) => {
             state.variables.insert(label.to_string(), variable.clone());
         }
-        Inst::VarDecl(label, variable) => {
+        Inst::VarDecl(line, label, variable) => {
             state.variables.insert(label.to_string(), variable.clone());
         }
-        Inst::Assign(lhs, rhs) => {
+        Inst::Assign(line, lhs, rhs) => {
             let rv = eval(state, rhs);
 
             /* TODO: borrow-checker to verify variables against function parameter list */
 
             state.variables.insert(lhs.to_string(), rv.unwrap());
         }
-        Inst::Eval(rhs) => {
+        Inst::Eval(line, rhs) => {
             let _ = eval(state, rhs);
         }
-        Inst::If(inst_list) => match inst_list.len() {
+        Inst::If(line, inst_list) => match inst_list.len() {
             2 => {
                 let eval = inst_list.get(0);
                 let path = inst_list.get(1);
@@ -111,10 +111,10 @@ fn process_inst(state: &mut State, inst: &Inst) -> Result<i32, ExitCode> {
                 unreachable!();
             }
         },
-        Inst::ReturnStmt(_) => {
+        Inst::ReturnStmt(line, _) => {
             return Err(ExitCode::EarlyExit);
         }
-        Inst::FieldDecl(_, _) => todo!(),
+        Inst::FieldDecl(line, _, _) => todo!(),
     }
 
     Ok(0)

@@ -60,11 +60,11 @@ fn split(s: String) -> (String, String) {
 
 fn post_ParmVarDecl(state: &mut ExecutionState, map: &serde_json::Map<std::string::String, Value>) {
     /* Parse ownership */
-    let ownership = state.annotation.contains("MOVE");
-    state.annotation.clear();
-
     let name = map.get("name").unwrap().as_str().unwrap().to_string();
     let qual_type = get_qual_type(map.get("type").unwrap()).unwrap();
+
+    let ownership = state.annotation.contains("MOVE");
+    state.annotation.clear();
 
     // println!("{} {}", name, qual_type);
 
@@ -77,13 +77,16 @@ fn post_ParmVarDecl(state: &mut ExecutionState, map: &serde_json::Map<std::strin
         indirection: indirection as u32,
     };
 
-    let inst = Inst::ParamDecl(name, variable);
+    let inst = Inst::ParamDecl(0, name, variable);
     state.inst.push(inst);
 }
 
 fn post_FieldDecl(state: &mut ExecutionState, map: &serde_json::Map<std::string::String, Value>) {
     /* Parse ownership */
-    assert!(state.annotation.len() != 0);
+    assert!(
+        state.annotation.len() != 0,
+        "FieldDecl ownership must be annotated!"
+    );
 
     let ownership = state.annotation.contains("MOVE");
     state.annotation.clear();
@@ -102,7 +105,7 @@ fn post_FieldDecl(state: &mut ExecutionState, map: &serde_json::Map<std::string:
         indirection: indirection as u32,
     };
 
-    let inst = Inst::FieldDecl(name, variable);
+    let inst = Inst::FieldDecl(0, name, variable);
     state.inst.push(inst);
 }
 
@@ -125,10 +128,10 @@ fn post_process_CallExpr(state: &mut ExecutionState, children: u32) {
     for k in 0..children - 1 {
         let inst = state.inst.pop().unwrap();
         match inst {
-            Inst::VarDecl(label, variable) => {
+            Inst::VarDecl(0, label, variable) => {
                 args.push(ExprDescriptor::LocalVariable(label));
             }
-            Inst::Eval(expr) => match expr {
+            Inst::Eval(0, expr) => match expr {
                 ExprDescriptor::FunctionCall(label, aargs) => {
                     args.push(ExprDescriptor::FunctionCall(label, aargs));
                 }
@@ -145,8 +148,8 @@ fn post_process_CallExpr(state: &mut ExecutionState, children: u32) {
     let func = state.inst.pop().unwrap();
 
     match func {
-        Inst::VarDecl(label, variable) => {
-            let inst = Inst::Eval(ExprDescriptor::FunctionCall(label, args));
+        Inst::VarDecl(0, label, variable) => {
+            let inst = Inst::Eval(0, ExprDescriptor::FunctionCall(label, args));
             state.inst.push(inst);
         }
         _ => {
@@ -189,6 +192,7 @@ fn post_FunctionDecl(
 
     let name = map.get("name").unwrap().as_str().unwrap().to_string();
     let qual_type = get_qual_type(map.get("type").unwrap()).unwrap();
+    let line = map.get("loc").unwrap().get("line").unwrap().as_str();
 
     let ret_type = remove_parentheses(qual_type);
     let is_const = ret_type.matches("const").count();
@@ -217,10 +221,10 @@ fn post_FunctionDecl(
     let mut param = Vec::new();
     for k in inst_set.iter() {
         match k {
-            Inst::ParamDecl(name, property) => {
+            Inst::ParamDecl(line, name, property) => {
                 param.push(property.clone());
             }
-            Inst::InstSet(set) => {
+            Inst::InstSet(line, set) => {
                 inst = set.clone();
             }
             _ => {
@@ -248,8 +252,8 @@ fn post_BinaryOperator(state: &mut ExecutionState, children: u32) {
     let lhs = state.inst.pop().unwrap();
 
     match (lhs, rhs) {
-        (Inst::VarDecl(label, variable), Inst::Eval(expr)) => {
-            state.inst.push(Inst::Assign(label, expr));
+        (Inst::VarDecl(line, label, variable), Inst::Eval(line2, expr)) => {
+            state.inst.push(Inst::Assign(0, label, expr));
         }
         _ => {
             unreachable!();
@@ -283,10 +287,14 @@ fn post_CompoundStmt(state: &mut ExecutionState, inst_cnt: usize) {
     }
     inst_set.reverse();
 
-    state.inst.push(Inst::InstSet(inst_set));
+    state.inst.push(Inst::InstSet(0, inst_set));
 }
 
-fn post_IfStmt(state: &mut ExecutionState, inst_cnt: usize) {
+fn post_IfStmt(
+    state: &mut ExecutionState,
+    map: &serde_json::Map<std::string::String, Value>,
+    inst_cnt: usize,
+) {
     let curr_size = state.inst.len();
     let mut inst_set = Vec::new();
     for k in 0..curr_size - inst_cnt {
@@ -295,12 +303,22 @@ fn post_IfStmt(state: &mut ExecutionState, inst_cnt: usize) {
     }
     inst_set.reverse();
 
-    state.inst.push(Inst::If(inst_set));
+    // let range = map.get("range");
+    // let begin = range.unwrap().get("begin").unwrap();
+    // let line = begin.get("line").unwrap();
+    let line = map
+        .get("range")
+        .unwrap()
+        .get("begin")
+        .unwrap()
+        .get("line")
+        .unwrap();
+    state.inst.push(Inst::If(line.as_u64().unwrap_or_default(), inst_set));
 }
 
 fn post_ReturnStmt(state: &mut ExecutionState) {
     /* TODO: return real variable */
-    state.inst.push(Inst::ReturnStmt("".to_string()));
+    state.inst.push(Inst::ReturnStmt(0, "".to_string()));
 }
 
 fn parse_paren_expr(state: &mut ExecutionState) {
@@ -396,7 +414,7 @@ fn post_processing(
                     parse_paren_expr(state);
                 }
                 "IfStmt" => {
-                    post_IfStmt(state, inst_cnt);
+                    post_IfStmt(state, map, inst_cnt);
                 }
                 "ReturnStmt" => {
                     post_ReturnStmt(state);
@@ -463,7 +481,7 @@ fn pre_process_referenced_decl(state: &mut ExecutionState, value: &Value) {
             indirection: 0,
         };
 
-        let inst = Inst::VarDecl(name.unwrap().to_string(), variable);
+        let inst = Inst::VarDecl(0, name.unwrap().to_string(), variable);
         state.inst.push(inst);
     }
 }
@@ -570,7 +588,7 @@ fn pre_processing(state: &mut ExecutionState, map: &serde_json::Map<std::string:
 
             state
                 .inst
-                .push(Inst::VarDecl(name.unwrap_or("").to_string(), var));
+                .push(Inst::VarDecl(0, name.unwrap_or("").to_string(), var));
         }
         "DeclStmt" => {}
         "TypedefDecl" => {
